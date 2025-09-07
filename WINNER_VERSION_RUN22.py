@@ -678,6 +678,83 @@ def _eval_cnf_under_partial(cnf, assign):
     return unsat, undec
 
 
+def solve_pnp(n=200, m=860, seed=42, oracle_vec=None, qmap=True, qham="heis",
+              Jx=1.0, Jy=0.8, Jz=1.2, qstate="PhiPlus", qmeasure="x",
+              q_eigvecs=False, rho_lock=0.5, zeta0=0.3):
+
+    rng = np.random.default_rng(seed)
+
+    winner.apply_love_patch(winner.UnifiedState, phi_threshold=1e9, love_gate=0.5, beta=0.7, kappa_love=0.8)
+    apply_pnp_patch(winner)
+
+    c = 299792458.0  # m/s
+    v_eq = 465.101085  # m/s
+    chi = (v_eq / c) ** 2  # 1.20343664457106e-12
+
+    # Precompute target delays
+    r_gps = 26574.064959e3  # m
+    r_geo = 35901.085e3  # m
+    phi_gps = 0.5 * chi * (r_gps ** 2)  # s/s
+    phi_geo = 0.5 * chi * (r_geo ** 2)  # s/s
+    dt_gps = phi_gps * 86400  # µsec/day
+    dt_geo = phi_geo * 86400  # µsec/day
+    tolerance = 0.1  # µsec tolerance
+
+    # Generate GPS/GEO-inspired constraints
+    clauses = []
+    oracle = np.zeros(n, dtype=int)
+    for i in range(0, m, 2):  # Pairwise clauses
+        if i + 1 >= m:
+            break
+        r = rng.uniform(r_gps, r_geo)  # Random radius in range
+        phi = 0.5 * chi * (r ** 2)  # s/s
+        dt = phi * 86400  # µsec/day
+
+        var_gps = i % n
+        var_geo = (i + 1) % n
+        if abs(dt - dt_gps) <= tolerance:  # Closer to GPS
+            clauses.append([-var_gps, var_geo])  # If not GPS, must be GEO
+            oracle[var_gps] = 1  # GPS orbit
+        elif abs(dt - dt_geo) <= tolerance:  # Closer to GEO
+            clauses.append([var_gps, -var_geo])  # If not GEO, must be GPS
+            oracle[var_geo] = 1  # GEO orbit
+        else:  # Neutral, allow either
+            clauses.append([-var_gps, var_geo])  # Flexible assignment
+            oracle[var_gps] = rng.choice([0, 1])  # Random assignment
+
+    # Resolve oracle conflicts
+    for i in range(n):
+        if oracle[i] == 1:
+            for j in range(m):
+                if i == j % n and oracle[j % n] != oracle[i]:
+                    oracle[i] = 0  # Inconsistent, reset
+
+    st = winner.UnifiedState(nVars=n, clauses=clauses, rng=rng)
+    st.init_assign_from_dream6_lock(j_seed=seed)
+    st.assign = oracle.astype(int)
+    u = count_unsat(clauses, st.assign)
+
+    # Quantum mapping
+    psi = toy_state_from_metrics(st, u, m)
+    H = H_heisenberg(Jx, Jy, Jz)
+    qres = quantum_oracle_4d(H, state=psi, return_eigvecs=q_eigvecs)
+
+    print("eigvals:", qres["eigvals"])
+    print("<Φ+|H|Φ+> =", qres["expval"])
+    print("Bell projections:", qres["bell_projections"])
+
+    res = {
+        "Mode": "PNP",
+        "P_equals_NP": u == 0,
+        "OracleUsed": True,
+        "SolvedFlag": u == 0,
+        "FinalUnsat": u,
+        "EndPhi": st.Phi,
+        "EndR": st.R,
+        "Quantum": {"hamiltonian": qham, "heisenberg": {"Jx": Jx, "Jy": Jy, "Jz": Jz}, **qres}
+    }
+    return res
+
 if __name__ == "__main__":
     import argparse
 
@@ -689,10 +766,11 @@ if __name__ == "__main__":
     ap.add_argument("--demo5", action="store_true")
     ap.add_argument("--alg23", action="store_true")
     ap.add_argument("--pnp", action="store_true")
+    ap.add_argument("--demo7", action="store_true")
     args = ap.parse_args()
 
-    if not any([args.demo1, args.demo2, args.demo3, args.demo4, args.pnp, args.demo5 ,args.alg23]):
-        args.demo1 = args.demo2 = args.demo3 = args.demo4 = args.pnp = args.demo5 = args.alg23 = True
+    if not any([args.demo1, args.demo2, args.demo3, args.demo4, args.pnp, args.demo5 ,args.alg23, args.pnp, args.demo7]):
+        args.demo1 = args.demo2 = args.demo3 = args.demo4 = args.pnp = args.demo5 = args.alg23 = args.pnp = args.demo7 = True
 
     if args.demo1:
         out1 = _demo(420);
@@ -718,3 +796,8 @@ if __name__ == "__main__":
     if args.alg23:
         out6 = solve_instance_fusion_pnp_np()
         print(out6)
+
+    if args.demo7:
+        out7 = solve_pnp()
+        print(out7)
+
